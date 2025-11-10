@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.1.0...v1.1.1) (2025-11-10)
+
+
+### Bug Fixes
+
+* linux glibc version error ([#7](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/7)) ([5009a9d](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/5009a9d8cf058f6278cfb18b759812b89ed1b49a))
+
 ## [1.1.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.0.0...v1.1.0) (2025-11-10)
 
 
