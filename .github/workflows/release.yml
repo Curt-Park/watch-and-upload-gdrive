@@ -2,7 +2,13 @@ name: Release
 
 on:
   release:
-    types: [published]
+    types: [published, created]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v1.0.0)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -53,6 +59,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.binary }}
+          tag_name: ${{ github.event.inputs.tag || github.event.release.tag_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
