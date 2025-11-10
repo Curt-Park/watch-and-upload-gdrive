@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.1.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.0.0...v1.1.0) (2025-11-10)
+
+
+### Features
+
+* create a new folder on google drive ([#6](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/6)) ([2363426](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/23634269be450a4438a9f428bee2c4ab89a818a8))
+
+
+### Bug Fixes
+
+* build manually ([#4](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/4)) ([ddc59ce](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/ddc59ce55022221c33272f359e2c2ee0e6beff8e))
+
 ## 1.0.0 (2025-11-10)
 
 
