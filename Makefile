@@ -40,7 +40,7 @@ build-all: build-linux build-darwin build-windows
 build-linux:
 	@echo "Building for Linux..."
 	@mkdir -p $(OUTPUT_DIR)
-	GOOS=linux GOARCH=amd64 $(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
 	@echo "Linux build complete: $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64"
 
 build-darwin:
@@ -59,7 +59,7 @@ build-windows:
 # Build for specific platform (for CI/CD)
 build-linux-amd64:
 	@mkdir -p $(OUTPUT_DIR)
-	GOOS=linux GOARCH=amd64 $(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
+	CGO_ENABLED=0 GOOS=linux GOARCH=amd64 $(GOBUILD) $(BUILD_FLAGS) $(LDFLAGS) -o $(OUTPUT_DIR)/$(BINARY_NAME)-linux-amd64 .
 
 build-darwin-amd64:
 	@mkdir -p $(OUTPUT_DIR)
