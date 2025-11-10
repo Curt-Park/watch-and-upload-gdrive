@@ -52,6 +52,7 @@ jobs:
       - name: Build binary
         env:
           OUTPUT_DIR: .
+          CGO_ENABLED: 0
         run: |
           make build-${{ matrix.os }}-${{ matrix.arch }}
 
