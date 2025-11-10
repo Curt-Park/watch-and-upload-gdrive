@@ -53,7 +53,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ${{ matrix.binary }}
-          tag: ${{ github.event.release.tag_name }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
