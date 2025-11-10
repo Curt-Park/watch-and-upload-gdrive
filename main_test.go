@@ -392,3 +392,98 @@ func TestWaitForFileReady_FileSizeStabilization(t *testing.T) {
 	}
 }
 
+func TestIsLikelyFolderID(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected bool
+	}{
+		{
+			name:     "valid folder ID format",
+			input:    "1a2b3c4d5e6f7g8h9i0j1k2l3m4n5o6p",
+			expected: true,
+		},
+		{
+			name:     "short string",
+			input:    "test",
+			expected: false,
+		},
+		{
+			name:     "long string with slash",
+			input:    "1a2b3c4d5e6f7g8h9i0j/path",
+			expected: false,
+		},
+		{
+			name:     "exactly 20 characters",
+			input:    "12345678901234567890",
+			expected: true,
+		},
+		{
+			name:     "19 characters",
+			input:    "1234567890123456789",
+			expected: false,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: false,
+		},
+		{
+			name:     "folder name with spaces",
+			input:    "My Folder Name",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isLikelyFolderID(tt.input)
+			if got != tt.expected {
+				t.Errorf("isLikelyFolderID(%q) = %v, want %v", tt.input, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestBuildFolderSearchQuery(t *testing.T) {
+	tests := []struct {
+		name       string
+		folderName string
+		expected   string
+	}{
+		{
+			name:       "simple folder name",
+			folderName: "MyFolder",
+			expected:   "name='MyFolder' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+		},
+		{
+			name:       "folder name with single quote",
+			folderName: "O'Reilly",
+			expected:   "name='O\\'Reilly' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+		},
+		{
+			name:       "folder name with multiple quotes",
+			folderName: "Test's Folder's Name",
+			expected:   "name='Test\\'s Folder\\'s Name' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+		},
+		{
+			name:       "empty folder name",
+			folderName: "",
+			expected:   "name='' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+		},
+		{
+			name:       "folder name with special characters",
+			folderName: "Folder-Name_123",
+			expected:   "name='Folder-Name_123' and mimeType='application/vnd.google-apps.folder' and trashed=false",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildFolderSearchQuery(tt.folderName)
+			if got != tt.expected {
+				t.Errorf("buildFolderSearchQuery(%q) = %q, want %q", tt.folderName, got, tt.expected)
+			}
+		})
+	}
+}
