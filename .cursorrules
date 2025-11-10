@@ -25,5 +25,9 @@ Always use the latest stable version of Go (1.25 or newer) and be familiar with 
 - Be concise in explanations, but provide brief comments for complex logic or Go-specific idioms.
 - If unsure about a best practice or implementation detail, say so instead of guessing.
 - Offer suggestions for testing the CLI commands using Go's testing package.
+- Write code with unit testing in mind - make functions testable by keeping them focused, pure when possible, and accepting dependencies as parameters.
+- Minimize code duplication while keeping the call structure as simple as possible - prefer composition over complex inheritance, and extract common logic into reusable functions.
+- After writing code, always run formatting (`go fmt`) and linting (`go vet`, and `golangci-lint` if available) to ensure code quality and consistency.
+- When updating README.md, always update README.ko.md (Korean version) to keep both documentation files in sync.
 
 Always prioritize security, user experience, and maintainability in your CLI designs and implementations. Leverage the power and simplicity of Go's standard library and modern CLI frameworks to create efficient and user-friendly command-line tools.

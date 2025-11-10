@@ -53,6 +53,7 @@ var (
 var (
 	directoryPath string
 	filterPattern string
+	folderID      string
 )
 
 var rootCmd = &cobra.Command{
@@ -65,6 +66,7 @@ var rootCmd = &cobra.Command{
 
 func init() {
 	rootCmd.Flags().StringVarP(&filterPattern, "filter", "f", "", "File extension filter for uploads (e.g., *.txt)")
+	rootCmd.Flags().StringVarP(&folderID, "path", "p", "", "Google Drive folder name or ID to upload files to (will be created if it doesn't exist)")
 }
 
 func main() {
@@ -88,6 +90,8 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("%w: %v", ErrInvalidFilter, err)
 		}
 	}
+
+	// Note: folderID validation is now done when finding/creating the folder
 
 	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
@@ -113,8 +117,19 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Filter pattern: %s\n", filterPattern)
 	}
 
+	// Resolve folder ID if folder name is provided
+	var resolvedFolderID string
+	if folderID != "" {
+		var err error
+		resolvedFolderID, err = findOrCreateFolder(ctx, client, folderID)
+		if err != nil {
+			return fmt.Errorf("failed to find or create folder: %v", err)
+		}
+		fmt.Printf("Using folder: %s (ID: %s)\n", folderID, resolvedFolderID)
+	}
+
 	// Start file watching
-	if err := watchDirectory(ctx, client, directoryPath, filterPattern); err != nil {
+	if err := watchDirectory(ctx, client, directoryPath, filterPattern, resolvedFolderID); err != nil {
 		return fmt.Errorf("%w: %v", ErrRuntimeError, err)
 	}
 
@@ -167,6 +182,67 @@ func validateFilter(filter string) error {
 	}
 
 	return nil
+}
+
+// isLikelyFolderID checks if a string looks like a Google Drive folder ID
+func isLikelyFolderID(folderNameOrID string) bool {
+	return len(folderNameOrID) >= 20 && !strings.Contains(folderNameOrID, "/")
+}
+
+// buildFolderSearchQuery builds a Google Drive API query to search for a folder by name
+func buildFolderSearchQuery(folderName string) string {
+	escapedName := strings.ReplaceAll(folderName, "'", "\\'")
+	return fmt.Sprintf("name='%s' and mimeType='application/vnd.google-apps.folder' and trashed=false", escapedName)
+}
+
+// findOrCreateFolder finds a folder by name or ID, or creates it if it doesn't exist
+func findOrCreateFolder(ctx context.Context, driveService *drive.Service, folderNameOrID string) (string, error) {
+	// First, check if it's a folder ID (typically longer than 20 characters)
+	// If it looks like an ID, try to use it directly
+	if isLikelyFolderID(folderNameOrID) {
+		// Try to get the folder by ID
+		folder, err := driveService.Files.Get(folderNameOrID).Fields("id", "name", "mimeType").Context(ctx).Do()
+		if err == nil {
+			// Check if it's actually a folder
+			if folder.MimeType == "application/vnd.google-apps.folder" {
+				return folder.Id, nil
+			}
+			return "", fmt.Errorf("the specified ID is not a folder")
+		}
+		// If 404, it's not a valid ID, so treat it as a folder name
+	}
+
+	// Search for folder by name in root directory
+	query := buildFolderSearchQuery(folderNameOrID)
+	list, err := driveService.Files.List().
+		Q(query).
+		Fields("files(id, name)").
+		PageSize(10).
+		Context(ctx).
+		Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to search for folder: %v", err)
+	}
+
+	// If folder exists, return its ID
+	if len(list.Files) > 0 {
+		return list.Files[0].Id, nil
+	}
+
+	// Folder doesn't exist, create it
+	fmt.Printf("Folder '%s' not found, creating it...\n", folderNameOrID)
+	folder := &drive.File{
+		Name:     folderNameOrID,
+		MimeType: "application/vnd.google-apps.folder",
+	}
+
+	createdFolder, err := driveService.Files.Create(folder).Fields("id", "name").Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to create folder: %v", err)
+	}
+
+	fmt.Printf("Created folder '%s' (ID: %s)\n", createdFolder.Name, createdFolder.Id)
+	return createdFolder.Id, nil
 }
 
 func getDriveClient(ctx context.Context) (*drive.Service, error) {
@@ -281,7 +357,7 @@ func getTokenFromWeb(ctx context.Context, config *oauth2.Config) (*oauth2.Token,
 	return tok, nil
 }
 
-func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath string, filter string) error {
+func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath string, filter string, folderID string) error {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("failed to create file watcher: %v", err)
@@ -326,7 +402,7 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 						return
 					}
 					fmt.Printf("New file detected: %s\n", filePath)
-					if err := uploadFile(ctx, driveService, filePath); err != nil {
+					if err := uploadFile(ctx, driveService, filePath, folderID); err != nil {
 						log.Printf("Upload failed for %s: %v", filePath, err)
 					} else {
 						fmt.Printf("Upload completed: %s\n", filePath)
@@ -440,7 +516,7 @@ func matchesFilter(filename string, filter string) bool {
 	return strings.Contains(filename, filter)
 }
 
-func uploadFile(ctx context.Context, driveService *drive.Service, filePath string) error {
+func uploadFile(ctx context.Context, driveService *drive.Service, filePath string, folderID string) error {
 	file, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("failed to open file: %v", err)
@@ -455,9 +531,17 @@ func uploadFile(ctx context.Context, driveService *drive.Service, filePath strin
 		Name: fileName,
 	}
 
+	// Set parent folder if specified
+	if folderID != "" {
+		f.Parents = []string{folderID}
+	}
+
 	// Upload file with context support
 	_, err = driveService.Files.Create(f).Media(file).Context(ctx).Do()
 	if err != nil {
+		if folderID != "" {
+			return fmt.Errorf("failed to upload to Google Drive folder (ID: %s): %v", folderID, err)
+		}
 		return fmt.Errorf("failed to upload to Google Drive: %v", err)
 	}
 

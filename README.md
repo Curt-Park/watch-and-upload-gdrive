@@ -2,6 +2,8 @@
 
 A Go-based CLI tool that watches a directory and automatically uploads new files to Google Drive.
 
+**한국어**: 한국어 문서는 [README.ko.md](README.ko.md)를 참조하세요.
+
 ## Features
 
 - Real-time directory monitoring
@@ -11,9 +13,45 @@ A Go-based CLI tool that watches a directory and automatically uploads new files
 
 ## Installation
 
+### Option 1: Download Pre-built Binary (Recommended)
+
+1. Go to the [Releases page](https://github.com/Curt-Park/watch-and-upload-gdrive/releases)
+2. Download the binary for your platform:
+   - **Linux**: `wug-linux-amd64`
+   - **macOS (Intel)**: `wug-darwin-amd64`
+   - **macOS (Apple Silicon)**: `wug-darwin-arm64`
+   - **Windows**: `wug-windows-amd64.exe`
+3. Make it executable and rename to `wug` (Linux/macOS):
+```bash
+# Linux
+chmod +x wug-linux-amd64
+mv wug-linux-amd64 wug
+
+# macOS Intel
+chmod +x wug-darwin-amd64
+mv wug-darwin-amd64 wug
+
+# macOS Apple Silicon
+chmod +x wug-darwin-arm64
+mv wug-darwin-arm64 wug
+
+# Windows: Rename wug-windows-amd64.exe to wug.exe
+```
+
+4. Move to a directory in your PATH (optional):
+```bash
+# Linux/macOS
+sudo mv wug /usr/local/bin/wug
+
+# Or use it directly from current directory
+./wug /path/to/directory
+```
+
+### Option 2: Build from Source
+
 1. Clone the repository:
 ```bash
-git clone https://github.com/user/watch-and-upload-gdrive.git
+git clone https://github.com/Curt-Park/watch-and-upload-gdrive.git
 cd watch-and-upload-gdrive
 ```
 
@@ -25,6 +63,11 @@ go mod download
 3. Build:
 ```bash
 go build -o wug
+```
+
+Or use Makefile:
+```bash
+make build
 ```
 
 ## Configuration
@@ -88,8 +131,17 @@ go build -o wug
 ### Basic Usage (Upload all new files)
 
 ```bash
+# If you downloaded the binary and renamed it to 'wug'
 ./wug /path/to/directory
+
+# Or if installed to PATH
+wug /path/to/directory
+
+# Windows
+wug.exe C:\path\to\directory
 ```
+
+This will upload files to the root of your Google Drive.
 
 ### Using Filter Option (Upload only specific file extensions)
 
@@ -102,6 +154,37 @@ Or using the short option:
 ```bash
 ./wug /path/to/directory -f "*.txt"
 ```
+
+### Uploading to a Specific Google Drive Folder
+
+To upload files to a specific folder in Google Drive, use the `--path` or `-p` option with the folder name or ID:
+
+```bash
+# Using folder name (will be created if it doesn't exist)
+./wug /path/to/directory --path "MyUploads"
+```
+
+Or using the short option:
+
+```bash
+./wug /path/to/directory -p "MyUploads"
+```
+
+**Using folder name:**
+- If the folder doesn't exist, it will be automatically created in your Google Drive root directory
+- Example: `./wug /path/to/directory -p "Backups"` - creates or uses the "Backups" folder
+
+**Using folder ID (advanced):**
+- You can also use a folder ID directly if you know it
+- Example: `./wug /path/to/directory -p "1a2b3c4d5e6f7g8h9i0j"`
+- **How to find a Google Drive folder ID:**
+  1. Open Google Drive in your web browser
+  2. Navigate to the folder where you want to upload files
+  3. Click on the folder to open it
+  4. Look at the URL in your browser's address bar
+  5. The folder ID is the long string of characters after `/folders/` in the URL
+     - Example URL: `https://drive.google.com/drive/folders/1a2b3c4d5e6f7g8h9i0j`
+     - Folder ID: `1a2b3c4d5e6f7g8h9i0j`
 
 **Note**: Always quote the filter pattern (e.g., `"*.txt"`) to prevent shell glob expansion.
 
