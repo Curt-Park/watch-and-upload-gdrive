@@ -79,25 +79,19 @@ func main() {
 func run(cmd *cobra.Command, args []string) error {
 	directoryPath = args[0]
 
-	// Validate directory path
 	if err := validateDirectory(directoryPath); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidDirectory, err)
 	}
 
-	// Validate filter pattern if provided
 	if filterPattern != "" {
 		if err := validateFilter(filterPattern); err != nil {
 			return fmt.Errorf("%w: %v", ErrInvalidFilter, err)
 		}
 	}
 
-	// Note: folderID validation is now done when finding/creating the folder
-
-	// Create context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Setup graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
@@ -106,7 +100,6 @@ func run(cmd *cobra.Command, args []string) error {
 		cancel()
 	}()
 
-	// Initialize Google Drive client
 	client, err := getDriveClient(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
@@ -117,7 +110,6 @@ func run(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Filter pattern: %s\n", filterPattern)
 	}
 
-	// Resolve folder ID if folder name is provided
 	var resolvedFolderID string
 	if folderID != "" {
 		var err error
@@ -126,9 +118,10 @@ func run(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("failed to find or create folder: %v", err)
 		}
 		fmt.Printf("Using folder: %s (ID: %s)\n", folderID, resolvedFolderID)
+	} else {
+		fmt.Println("Uploading to Google Drive root directory")
 	}
 
-	// Start file watching
 	if err := watchDirectory(ctx, client, directoryPath, filterPattern, resolvedFolderID); err != nil {
 		return fmt.Errorf("%w: %v", ErrRuntimeError, err)
 	}
@@ -357,40 +350,70 @@ func getTokenFromWeb(ctx context.Context, config *oauth2.Config) (*oauth2.Token,
 	return tok, nil
 }
 
-func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath string, filter string, folderID string) error {
-	watcher, err := fsnotify.NewWatcher()
+// normalizePath converts a file path to an absolute, cleaned path for consistent comparison.
+// On Linux/Ubuntu, it also resolves symbolic links to ensure consistent path comparison
+// between filepath.Walk and fsnotify events.
+func normalizePath(path string) (string, error) {
+	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return fmt.Errorf("failed to create file watcher: %v", err)
-	}
-	defer watcher.Close()
-
-	// Start watching directory
-	if err := watcher.Add(dirPath); err != nil {
-		return fmt.Errorf("failed to add directory to watcher: %v", err)
+		return "", fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
-	// Track existing files to prevent duplicate uploads
+	// Resolve symbolic links to ensure consistent path comparison
+	// This is especially important on Linux/Ubuntu where symlinks are common
+	// filepath.EvalSymlinks returns the path itself if it's not a symlink or doesn't exist
+	resolvedPath, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		// If the path doesn't exist yet (e.g., during file creation), use the cleaned absolute path
+		// This can happen when fsnotify reports a file creation event before the file is fully created
+		return filepath.Clean(absPath), nil
+	}
+
+	return filepath.Clean(resolvedPath), nil
+}
+
+// scanExistingFiles scans the directory and returns a map of existing file paths
+func scanExistingFiles(dirPath string) (map[string]bool, error) {
 	existingFiles := make(map[string]bool)
 	if err := filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() {
-			existingFiles[path] = true
+			normalizedPath, err := normalizePath(path)
+			if err != nil {
+				return err
+			}
+			existingFiles[normalizedPath] = true
 		}
 		return nil
 	}); err != nil {
-		return fmt.Errorf("failed to scan directory: %v", err)
+		return nil, err
+	}
+	return existingFiles, nil
+}
+
+// processFileEvent checks if a file should be processed for upload
+func processFileEvent(normalizedPath string, filter string, existingFiles map[string]bool) bool {
+	info, err := os.Stat(normalizedPath)
+	if err != nil || info.IsDir() {
+		return false
 	}
 
-	fmt.Println("Watching for files... (Press Ctrl+C to exit)")
+	if filter != "" && !matchesFilter(normalizedPath, filter) {
+		return false
+	}
 
-	// Upload queue and worker pool
-	uploadQueue := make(chan string, 10)
-	var wg sync.WaitGroup
-	const numWorkers = 3
+	if existingFiles[normalizedPath] {
+		return false
+	}
 
-	// Start upload workers
+	existingFiles[normalizedPath] = true
+	return true
+}
+
+// startUploadWorkers starts worker goroutines to process file uploads
+func startUploadWorkers(ctx context.Context, wg *sync.WaitGroup, uploadQueue <-chan string, driveService *drive.Service, folderID string, numWorkers int) {
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func() {
@@ -413,12 +436,40 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 			}
 		}()
 	}
+}
 
-	// Main watch loop
+func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath string, filter string, folderID string) error {
+	normalizedDirPath, err := normalizePath(dirPath)
+	if err != nil {
+		return fmt.Errorf("failed to normalize directory path: %v", err)
+	}
+
+	watcher, err := fsnotify.NewWatcher()
+	if err != nil {
+		return fmt.Errorf("failed to create file watcher: %v", err)
+	}
+	defer watcher.Close()
+
+	if err := watcher.Add(normalizedDirPath); err != nil {
+		return fmt.Errorf("failed to add directory to watcher: %v", err)
+	}
+
+	existingFiles, err := scanExistingFiles(normalizedDirPath)
+	if err != nil {
+		return fmt.Errorf("failed to scan directory: %v", err)
+	}
+
+	fmt.Println("Watching for files... (Press Ctrl+C to exit)")
+
+	uploadQueue := make(chan string, 10)
+	var wg sync.WaitGroup
+	const numWorkers = 3
+
+	startUploadWorkers(ctx, &wg, uploadQueue, driveService, folderID, numWorkers)
+
 	for {
 		select {
 		case <-ctx.Done():
-			// Graceful shutdown: close upload queue and wait for workers
 			close(uploadQueue)
 			wg.Wait()
 			return nil
@@ -428,37 +479,21 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 				return nil
 			}
 
-			// Process only file creation events
 			if event.Op&fsnotify.Create == fsnotify.Create {
-				// Check if it's a file (exclude directories)
-				info, err := os.Stat(event.Name)
+				normalizedPath, err := normalizePath(event.Name)
 				if err != nil {
+					log.Printf("Failed to normalize event path %s: %v", event.Name, err)
 					continue
 				}
 
-				if !info.IsDir() {
-					// Check filter
-					if filter != "" && !matchesFilter(event.Name, filter) {
-						continue
-					}
-
-					// Check if file already exists (exclude files found in initial scan)
-					if existingFiles[event.Name] {
-						continue
-					}
-
-					// Mark as existing to prevent duplicate processing
-					existingFiles[event.Name] = true
-
-					// Wait until file is completely written (file size stabilizes)
-					if err := waitForFileReady(ctx, event.Name); err != nil {
+				if processFileEvent(normalizedPath, filter, existingFiles) {
+					if err := waitForFileReady(ctx, normalizedPath); err != nil {
 						log.Printf("Failed to wait for file ready: %v", err)
 						continue
 					}
 
-					// Queue file for upload
 					select {
-					case uploadQueue <- event.Name:
+					case uploadQueue <- normalizedPath:
 					case <-ctx.Done():
 						return nil
 					}

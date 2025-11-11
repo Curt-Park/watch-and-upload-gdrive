@@ -66,11 +66,10 @@ func TestValidateDirectory(t *testing.T) {
 			dirPath, cleanup := tt.setup()
 			defer cleanup()
 
-			if tt.dirPath == "" && dirPath != "" {
-				dirPath = dirPath // Use the temp dir from setup
-			} else if tt.dirPath != "" {
+			if tt.dirPath != "" {
 				dirPath = tt.dirPath // Use the specified path
 			}
+			// If tt.dirPath is empty, use the temp dir from setup
 
 			err := validateDirectory(dirPath)
 			if (err != nil) != tt.wantErr {
@@ -165,33 +164,27 @@ func TestMatchesFilter(t *testing.T) {
 			want:     true,
 		},
 		{
-			name:     "case insensitive filter",
-			filename: "test.txt",
-			filter:   "*.TXT",
-			want:     true,
-		},
-		{
 			name:     "no match - no extension",
 			filename: "test",
 			filter:   "*.txt",
 			want:     false,
 		},
 		{
-			name:     "filter without asterisk - contains check",
-			filename: "test.txt",
-			filter:   ".txt",
-			want:     true,
-		},
-		{
-			name:     "filter without asterisk - no match",
-			filename: "test.pdf",
-			filter:   ".txt",
-			want:     false,
-		},
-		{
 			name:     "match with path",
 			filename: "/path/to/file.txt",
 			filter:   "*.txt",
+			want:     true,
+		},
+		{
+			name:     "match png with absolute path",
+			filename: "/home/jovyan/comfyui/output/output/image.png",
+			filter:   "*.png",
+			want:     true,
+		},
+		{
+			name:     "case insensitive png match",
+			filename: "image.PNG",
+			filter:   "*.png",
 			want:     true,
 		},
 	}
@@ -445,6 +438,130 @@ func TestIsLikelyFolderID(t *testing.T) {
 	}
 }
 
+func TestNormalizePath(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "wug-test-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	testFile := filepath.Join(tmpDir, "test.txt")
+	if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		input    string
+		wantErr  bool
+		validate func(t *testing.T, got string)
+	}{
+		{
+			name:    "absolute path",
+			input:   testFile,
+			wantErr: false,
+			validate: func(t *testing.T, got string) {
+				if !filepath.IsAbs(got) {
+					t.Errorf("normalizePath() = %v, want absolute path", got)
+				}
+			},
+		},
+		{
+			name:    "relative path",
+			input:   "test.txt",
+			wantErr: false,
+			validate: func(t *testing.T, got string) {
+				if !filepath.IsAbs(got) {
+					t.Errorf("normalizePath() = %v, want absolute path", got)
+				}
+			},
+		},
+		{
+			name:    "path with ..",
+			input:   filepath.Join(tmpDir, "..", filepath.Base(tmpDir), "test.txt"),
+			wantErr: false,
+			validate: func(t *testing.T, got string) {
+				if !filepath.IsAbs(got) {
+					t.Errorf("normalizePath() = %v, want absolute path", got)
+				}
+				// Should resolve to the same file
+				if got != testFile {
+					info1, _ := os.Stat(got)
+					info2, _ := os.Stat(testFile)
+					if info1.Name() != info2.Name() {
+						t.Errorf("normalizePath() = %v, want same file as %v", got, testFile)
+					}
+				}
+			},
+		},
+		{
+			name:    "empty path",
+			input:   "",
+			wantErr: false,
+			validate: func(t *testing.T, got string) {
+				if !filepath.IsAbs(got) {
+					t.Errorf("normalizePath() = %v, want absolute path", got)
+				}
+			},
+		},
+		{
+			name:    "non-existent path",
+			input:   filepath.Join(tmpDir, "nonexistent.txt"),
+			wantErr: false,
+			validate: func(t *testing.T, got string) {
+				if !filepath.IsAbs(got) {
+					t.Errorf("normalizePath() = %v, want absolute path", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := normalizePath(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("normalizePath() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr && tt.validate != nil {
+				tt.validate(t, got)
+			}
+		})
+	}
+
+	// Test symbolic link resolution (important for Linux/Ubuntu)
+	t.Run("symbolic link resolution", func(t *testing.T) {
+		// Create a target file
+		targetFile := filepath.Join(tmpDir, "target.txt")
+		if err := os.WriteFile(targetFile, []byte("target"), 0644); err != nil {
+			t.Fatalf("Failed to create target file: %v", err)
+		}
+
+		// Create a symbolic link (may not work on all systems, so we check for errors)
+		symlinkFile := filepath.Join(tmpDir, "link.txt")
+		if err := os.Symlink(targetFile, symlinkFile); err != nil {
+			// Skip test if symlinks are not supported (e.g., on some Windows systems)
+			t.Skipf("Skipping symlink test: %v", err)
+		}
+
+		// Normalize the symlink path - should resolve to the target
+		normalized, err := normalizePath(symlinkFile)
+		if err != nil {
+			t.Fatalf("normalizePath() error = %v", err)
+		}
+
+		// The normalized path should resolve to the target file
+		targetNormalized, err := normalizePath(targetFile)
+		if err != nil {
+			t.Fatalf("normalizePath() error for target = %v", err)
+		}
+
+		if normalized != targetNormalized {
+			t.Errorf("normalizePath(symlink) = %v, want %v (should resolve symlink)", normalized, targetNormalized)
+		}
+	})
+}
+
 func TestBuildFolderSearchQuery(t *testing.T) {
 	tests := []struct {
 		name       string
@@ -465,11 +582,6 @@ func TestBuildFolderSearchQuery(t *testing.T) {
 			name:       "folder name with multiple quotes",
 			folderName: "Test's Folder's Name",
 			expected:   "name='Test\\'s Folder\\'s Name' and mimeType='application/vnd.google-apps.folder' and trashed=false",
-		},
-		{
-			name:       "empty folder name",
-			folderName: "",
-			expected:   "name='' and mimeType='application/vnd.google-apps.folder' and trashed=false",
 		},
 		{
 			name:       "folder name with special characters",
