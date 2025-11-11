@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.1.1...v1.2.0) (2025-11-11)
+
+
+### Features
+
+* run on symbolic link on linux ([#9](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/9)) ([2f99db7](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/2f99db74f30b02f7f761bb506c9558657e3264e5))
+
 ## [1.1.1](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.1.0...v1.1.1) (2025-11-10)
 
 
