@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +11,15 @@ import (
 
 	"golang.org/x/oauth2"
 )
+
+// init initializes logger for tests
+func init() {
+	// Initialize logger for tests (use Info level by default)
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}
+	logger = slog.New(slog.NewTextHandler(os.Stdout, opts))
+}
 
 func TestValidateDirectory(t *testing.T) {
 	tests := []struct {
@@ -595,6 +605,124 @@ func TestBuildFolderSearchQuery(t *testing.T) {
 			got := buildFolderSearchQuery(tt.folderName)
 			if got != tt.expected {
 				t.Errorf("buildFolderSearchQuery(%q) = %q, want %q", tt.folderName, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestTrimQuotes(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "double quotes surrounding",
+			input:    `"test"`,
+			expected: "test",
+		},
+		{
+			name:     "single quotes surrounding",
+			input:    `'test'`,
+			expected: "test",
+		},
+		{
+			name:     "no quotes",
+			input:    "test",
+			expected: "test",
+		},
+		{
+			name:     "only opening double quote",
+			input:    `"test`,
+			expected: `"test`,
+		},
+		{
+			name:     "only closing double quote",
+			input:    `test"`,
+			expected: `test"`,
+		},
+		{
+			name:     "only opening single quote",
+			input:    `'test`,
+			expected: `'test`,
+		},
+		{
+			name:     "only closing single quote",
+			input:    `test'`,
+			expected: `test'`,
+		},
+		{
+			name:     "mismatched quotes - double then single",
+			input:    `"test'`,
+			expected: `"test'`,
+		},
+		{
+			name:     "mismatched quotes - single then double",
+			input:    `'test"`,
+			expected: `'test"`,
+		},
+		{
+			name:     "quotes in middle",
+			input:    `te"st`,
+			expected: `te"st`,
+		},
+		{
+			name:     "quotes in middle with surrounding quotes",
+			input:    `"te'st"`,
+			expected: `te'st`,
+		},
+		{
+			name:     "empty string",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "single character",
+			input:    "a",
+			expected: "a",
+		},
+		{
+			name:     "two double quotes only",
+			input:    `""`,
+			expected: "",
+		},
+		{
+			name:     "two single quotes only",
+			input:    `''`,
+			expected: "",
+		},
+		{
+			name:     "space with quotes",
+			input:    `" test "`,
+			expected: " test ",
+		},
+		{
+			name:     "folder name with spaces and quotes",
+			input:    `"My Folder"`,
+			expected: "My Folder",
+		},
+		{
+			name:     "folder name with spaces and single quotes",
+			input:    `'My Folder'`,
+			expected: "My Folder",
+		},
+		{
+			name:     "quotes inside quotes",
+			input:    `"test 'inner' quotes"`,
+			expected: "test 'inner' quotes",
+		},
+		{
+			name:     "long folder name with quotes",
+			input:    `"very long folder name with multiple words"`,
+			expected: "very long folder name with multiple words",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := trimQuotes(tt.input)
+			if got != tt.expected {
+				t.Errorf("trimQuotes(%q) = %q, want %q", tt.input, got, tt.expected)
 			}
 		})
 	}
