@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -50,10 +50,28 @@ var (
 	ErrRuntimeError       = errors.New("runtime error")
 )
 
+// initLogger initializes the logger based on verbose flag
+func initLogger() {
+	var level slog.Level
+	if verbose {
+		level = slog.LevelDebug
+	} else {
+		level = slog.LevelInfo
+	}
+
+	opts := &slog.HandlerOptions{
+		Level: level,
+	}
+
+	logger = slog.New(slog.NewTextHandler(os.Stdout, opts))
+}
+
 var (
 	directoryPath string
 	filterPattern string
 	folderID      string
+	verbose       bool
+	logger        *slog.Logger
 )
 
 var rootCmd = &cobra.Command{
@@ -67,6 +85,7 @@ var rootCmd = &cobra.Command{
 func init() {
 	rootCmd.Flags().StringVarP(&filterPattern, "filter", "f", "", "File extension filter for uploads (e.g., *.txt)")
 	rootCmd.Flags().StringVarP(&folderID, "path", "p", "", "Google Drive folder name or ID to upload files to (will be created if it doesn't exist)")
+	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Enable verbose (debug) logging")
 }
 
 func main() {
@@ -77,14 +96,19 @@ func main() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	// Initialize logger based on verbose flag
+	initLogger()
+
 	directoryPath = args[0]
 
 	if err := validateDirectory(directoryPath); err != nil {
+		logger.Error("Invalid directory", "path", directoryPath, "error", err)
 		return fmt.Errorf("%w: %v", ErrInvalidDirectory, err)
 	}
 
 	if filterPattern != "" {
 		if err := validateFilter(filterPattern); err != nil {
+			logger.Error("Invalid filter pattern", "pattern", filterPattern, "error", err)
 			return fmt.Errorf("%w: %v", ErrInvalidFilter, err)
 		}
 	}
@@ -96,33 +120,40 @@ func run(cmd *cobra.Command, args []string) error {
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		fmt.Println("\nShutting down gracefully...")
+		logger.Info("Shutting down gracefully...")
 		cancel()
 	}()
 
 	client, err := getDriveClient(ctx)
 	if err != nil {
+		logger.Error("Authentication failed", "error", err)
 		return fmt.Errorf("%w: %v", ErrAuthFailed, err)
 	}
 
-	fmt.Printf("Watching directory: %s\n", directoryPath)
+	logger.Info("Watching directory", "path", directoryPath)
 	if filterPattern != "" {
-		fmt.Printf("Filter pattern: %s\n", filterPattern)
+		logger.Info("Filter pattern", "pattern", filterPattern)
 	}
 
 	var resolvedFolderID string
 	if folderID != "" {
+		// Remove surrounding quotes if present (e.g., "test" -> test, 'test' -> test)
+		cleanedFolderID := trimQuotes(folderID)
+		logger.Debug("Processing folderID", "original", folderID, "cleaned", cleanedFolderID)
 		var err error
-		resolvedFolderID, err = findOrCreateFolder(ctx, client, folderID)
+		resolvedFolderID, err = findOrCreateFolder(ctx, client, cleanedFolderID)
 		if err != nil {
+			logger.Error("Failed to find or create folder", "name", cleanedFolderID, "error", err)
 			return fmt.Errorf("failed to find or create folder: %v", err)
 		}
-		fmt.Printf("Using folder: %s (ID: %s)\n", folderID, resolvedFolderID)
+		logger.Info("Using folder", "name", cleanedFolderID, "id", resolvedFolderID)
+		logger.Debug("Resolved folderID", "id", resolvedFolderID)
 	} else {
-		fmt.Println("Uploading to Google Drive root directory")
+		logger.Info("Uploading to Google Drive root directory")
 	}
 
 	if err := watchDirectory(ctx, client, directoryPath, filterPattern, resolvedFolderID); err != nil {
+		logger.Error("Runtime error in watchDirectory", "error", err)
 		return fmt.Errorf("%w: %v", ErrRuntimeError, err)
 	}
 
@@ -139,18 +170,22 @@ func validateDirectory(dirPath string) error {
 	info, err := os.Stat(dirPath)
 	if err != nil {
 		if os.IsNotExist(err) {
+			logger.Error("Directory does not exist", "path", dirPath)
 			return fmt.Errorf("directory does not exist: %s", dirPath)
 		}
+		logger.Error("Cannot access directory", "path", dirPath, "error", err)
 		return fmt.Errorf("cannot access directory: %v", err)
 	}
 
 	// Check if it's actually a directory
 	if !info.IsDir() {
+		logger.Error("Path is not a directory", "path", dirPath)
 		return fmt.Errorf("path is not a directory: %s", dirPath)
 	}
 
 	// Check if directory is readable
 	if info.Mode().Perm()&0444 == 0 {
+		logger.Error("Directory is not readable", "path", dirPath)
 		return fmt.Errorf("directory is not readable: %s", dirPath)
 	}
 
@@ -177,6 +212,25 @@ func validateFilter(filter string) error {
 	return nil
 }
 
+// trimQuotes removes surrounding quotes (single or double) from a string if present.
+// It only removes quotes if both the first and last characters are the same quote type.
+// This handles cases where users input quoted strings like "test" or 'test'.
+func trimQuotes(s string) string {
+	if len(s) < 2 {
+		return s
+	}
+
+	first := s[0]
+	last := s[len(s)-1]
+
+	// Check if string is surrounded by matching quotes
+	if (first == '"' && last == '"') || (first == '\'' && last == '\'') {
+		return s[1 : len(s)-1]
+	}
+
+	return s
+}
+
 // isLikelyFolderID checks if a string looks like a Google Drive folder ID
 func isLikelyFolderID(folderNameOrID string) bool {
 	return len(folderNameOrID) >= 20 && !strings.Contains(folderNameOrID, "/")
@@ -200,6 +254,7 @@ func findOrCreateFolder(ctx context.Context, driveService *drive.Service, folder
 			if folder.MimeType == "application/vnd.google-apps.folder" {
 				return folder.Id, nil
 			}
+			logger.Error("Specified ID is not a folder", "id", folderNameOrID)
 			return "", fmt.Errorf("the specified ID is not a folder")
 		}
 		// If 404, it's not a valid ID, so treat it as a folder name
@@ -214,6 +269,7 @@ func findOrCreateFolder(ctx context.Context, driveService *drive.Service, folder
 		Context(ctx).
 		Do()
 	if err != nil {
+		logger.Error("Failed to search for folder", "name", folderNameOrID, "error", err)
 		return "", fmt.Errorf("failed to search for folder: %v", err)
 	}
 
@@ -223,7 +279,7 @@ func findOrCreateFolder(ctx context.Context, driveService *drive.Service, folder
 	}
 
 	// Folder doesn't exist, create it
-	fmt.Printf("Folder '%s' not found, creating it...\n", folderNameOrID)
+	logger.Info("Folder not found, creating it", "name", folderNameOrID)
 	folder := &drive.File{
 		Name:     folderNameOrID,
 		MimeType: "application/vnd.google-apps.folder",
@@ -231,10 +287,11 @@ func findOrCreateFolder(ctx context.Context, driveService *drive.Service, folder
 
 	createdFolder, err := driveService.Files.Create(folder).Fields("id", "name").Context(ctx).Do()
 	if err != nil {
+		logger.Error("Failed to create folder", "name", folderNameOrID, "error", err)
 		return "", fmt.Errorf("failed to create folder: %v", err)
 	}
 
-	fmt.Printf("Created folder '%s' (ID: %s)\n", createdFolder.Name, createdFolder.Id)
+	logger.Info("Created folder", "name", createdFolder.Name, "id", createdFolder.Id)
 	return createdFolder.Id, nil
 }
 
@@ -242,6 +299,7 @@ func getDriveClient(ctx context.Context) (*drive.Service, error) {
 	// Get home directory
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
+		logger.Error("Failed to get home directory", "error", err)
 		return nil, fmt.Errorf("failed to get home directory: %v", err)
 	}
 
@@ -252,6 +310,7 @@ func getDriveClient(ctx context.Context) (*drive.Service, error) {
 	credentialsJSON, err := os.ReadFile(credentialsFile)
 	if err != nil {
 		if os.IsNotExist(err) {
+			logger.Error("Credentials file not found", "path", credentialsFile, "homeDir", homeDir)
 			return nil, fmt.Errorf(`%w: credentials.json file not found
 
 Please follow these steps to set up Google Drive credentials:
@@ -273,11 +332,13 @@ Please follow these steps to set up Google Drive credentials:
 
 For detailed instructions, see the README.md file.`, ErrConfigNotFound, homeDir)
 		}
+		logger.Error("Failed to read credentials file", "path", credentialsFile, "error", err)
 		return nil, fmt.Errorf("failed to read credentials file: %v", err)
 	}
 
 	config, err := google.ConfigFromJSON(credentialsJSON, drive.DriveFileScope)
 	if err != nil {
+		logger.Error("Failed to configure OAuth2", "error", err)
 		return nil, fmt.Errorf("failed to configure OAuth2: %v", err)
 	}
 
@@ -290,9 +351,11 @@ For detailed instructions, see the README.md file.`, ErrConfigNotFound, homeDir)
 		// Generate new token if not exists
 		tok, err = getTokenFromWeb(ctx, config)
 		if err != nil {
+			logger.Error("Failed to obtain token", "error", err)
 			return nil, fmt.Errorf("failed to obtain token: %v", err)
 		}
 		if err := saveToken(tokenFile, tok); err != nil {
+			logger.Error("Failed to save token", "path", tokenFile, "error", err)
 			return nil, fmt.Errorf("failed to save token: %v", err)
 		}
 	}
@@ -301,6 +364,7 @@ For detailed instructions, see the README.md file.`, ErrConfigNotFound, homeDir)
 	client := config.Client(ctx, tok)
 	srv, err := drive.NewService(ctx, option.WithHTTPClient(client))
 	if err != nil {
+		logger.Error("Drive service initialization failed", "error", err)
 		return nil, fmt.Errorf("%w: %v", ErrDriveServiceFailed, err)
 	}
 
@@ -315,19 +379,22 @@ func tokenFromFile(file string) (*oauth2.Token, error) {
 	defer f.Close()
 	tok := &oauth2.Token{}
 	if err := json.NewDecoder(f).Decode(tok); err != nil {
+		logger.Error("Failed to decode token", "file", file, "error", err)
 		return nil, fmt.Errorf("failed to decode token: %v", err)
 	}
 	return tok, nil
 }
 
 func saveToken(path string, token *oauth2.Token) error {
-	fmt.Printf("Saving token to %s\n", path)
+	logger.Info("Saving token", "path", path)
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
+		logger.Error("Unable to open token file", "path", path, "error", err)
 		return fmt.Errorf("unable to open token file: %v", err)
 	}
 	defer f.Close()
 	if err := json.NewEncoder(f).Encode(token); err != nil {
+		logger.Error("Failed to encode token", "path", path, "error", err)
 		return fmt.Errorf("failed to encode token: %v", err)
 	}
 	return nil
@@ -335,16 +402,18 @@ func saveToken(path string, token *oauth2.Token) error {
 
 func getTokenFromWeb(ctx context.Context, config *oauth2.Config) (*oauth2.Token, error) {
 	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-	fmt.Printf("Open the following URL in your browser and enter the authorization code:\n%v\n", authURL)
+	logger.Info("Open the following URL in your browser and enter the authorization code", "url", authURL)
 	fmt.Print("Enter authorization code: ")
 
 	var authCode string
 	if _, err := fmt.Scan(&authCode); err != nil {
+		logger.Error("Failed to read authorization code", "error", err)
 		return nil, fmt.Errorf("failed to read authorization code: %v", err)
 	}
 
 	tok, err := config.Exchange(ctx, authCode)
 	if err != nil {
+		logger.Error("Failed to exchange token", "error", err)
 		return nil, fmt.Errorf("failed to exchange token: %v", err)
 	}
 	return tok, nil
@@ -356,6 +425,7 @@ func getTokenFromWeb(ctx context.Context, config *oauth2.Config) (*oauth2.Token,
 func normalizePath(path string) (string, error) {
 	absPath, err := filepath.Abs(path)
 	if err != nil {
+		logger.Error("Failed to get absolute path", "path", path, "error", err)
 		return "", fmt.Errorf("failed to get absolute path: %v", err)
 	}
 
@@ -414,57 +484,68 @@ func processFileEvent(normalizedPath string, filter string, existingFiles map[st
 
 // startUploadWorkers starts worker goroutines to process file uploads
 func startUploadWorkers(ctx context.Context, wg *sync.WaitGroup, uploadQueue <-chan string, driveService *drive.Service, folderID string, numWorkers int) {
+	logger.Debug("Starting upload workers", "folderID", folderID, "numWorkers", numWorkers)
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func() {
+		go func(workerID int) {
 			defer wg.Done()
+			logger.Debug("Worker started", "workerID", workerID, "folderID", folderID)
 			for {
 				select {
 				case filePath := <-uploadQueue:
 					if filePath == "" {
 						return
 					}
-					fmt.Printf("New file detected: %s\n", filePath)
+					logger.Info("New file detected", "path", filePath)
+					logger.Debug("Worker uploading file", "workerID", workerID, "filePath", filePath, "folderID", folderID)
 					if err := uploadFile(ctx, driveService, filePath, folderID); err != nil {
-						log.Printf("Upload failed for %s: %v", filePath, err)
+						logger.Error("Upload failed", "path", filePath, "error", err)
 					} else {
-						fmt.Printf("Upload completed: %s\n", filePath)
+						logger.Info("Upload completed", "path", filePath)
 					}
 				case <-ctx.Done():
 					return
 				}
 			}
-		}()
+		}(i)
 	}
 }
 
 func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath string, filter string, folderID string) error {
+	logger.Debug("watchDirectory called", "dirPath", dirPath, "filter", filter, "folderID", folderID)
+
 	normalizedDirPath, err := normalizePath(dirPath)
 	if err != nil {
+		logger.Error("Failed to normalize directory path", "path", dirPath, "error", err)
 		return fmt.Errorf("failed to normalize directory path: %v", err)
 	}
+	logger.Debug("Normalized directory path", "path", normalizedDirPath)
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
+		logger.Error("Failed to create file watcher", "error", err)
 		return fmt.Errorf("failed to create file watcher: %v", err)
 	}
 	defer watcher.Close()
 
 	if err := watcher.Add(normalizedDirPath); err != nil {
+		logger.Error("Failed to add directory to watcher", "path", normalizedDirPath, "error", err)
 		return fmt.Errorf("failed to add directory to watcher: %v", err)
 	}
 
 	existingFiles, err := scanExistingFiles(normalizedDirPath)
 	if err != nil {
+		logger.Error("Failed to scan directory", "path", normalizedDirPath, "error", err)
 		return fmt.Errorf("failed to scan directory: %v", err)
 	}
 
-	fmt.Println("Watching for files... (Press Ctrl+C to exit)")
+	logger.Info("Watching for files... (Press Ctrl+C to exit)")
 
 	uploadQueue := make(chan string, 10)
 	var wg sync.WaitGroup
 	const numWorkers = 3
 
+	logger.Debug("Starting upload workers", "folderID", folderID)
 	startUploadWorkers(ctx, &wg, uploadQueue, driveService, folderID, numWorkers)
 
 	for {
@@ -480,23 +561,29 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 			}
 
 			if event.Op&fsnotify.Create == fsnotify.Create {
+				logger.Debug("File creation event detected", "path", event.Name)
 				normalizedPath, err := normalizePath(event.Name)
 				if err != nil {
-					log.Printf("Failed to normalize event path %s: %v", event.Name, err)
+					logger.Error("Failed to normalize event path", "path", event.Name, "error", err)
 					continue
 				}
+				logger.Debug("Normalized event path", "path", normalizedPath)
 
 				if processFileEvent(normalizedPath, filter, existingFiles) {
+					logger.Debug("File event processed, waiting for file ready", "path", normalizedPath)
 					if err := waitForFileReady(ctx, normalizedPath); err != nil {
-						log.Printf("Failed to wait for file ready: %v", err)
+						logger.Error("Failed to wait for file ready", "path", normalizedPath, "error", err)
 						continue
 					}
 
 					select {
 					case uploadQueue <- normalizedPath:
+						logger.Debug("File queued for upload", "path", normalizedPath)
 					case <-ctx.Done():
 						return nil
 					}
+				} else {
+					logger.Debug("File event skipped (filtered or already exists)", "path", normalizedPath)
 				}
 			}
 
@@ -504,7 +591,7 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 			if !ok {
 				return nil
 			}
-			log.Printf("Watch error: %v", err)
+			logger.Error("Watch error", "error", err)
 		}
 	}
 }
@@ -533,6 +620,7 @@ func waitForFileReady(ctx context.Context, filePath string) error {
 
 		if time.Since(startTime) > maxWaitTime {
 			// Maximum wait time exceeded
+			logger.Error("File ready wait timeout", "path", filePath, "maxWaitTime", maxWaitTime)
 			return fmt.Errorf("file ready wait timeout")
 		}
 
@@ -552,14 +640,18 @@ func matchesFilter(filename string, filter string) bool {
 }
 
 func uploadFile(ctx context.Context, driveService *drive.Service, filePath string, folderID string) error {
+	logger.Debug("uploadFile called", "filePath", filePath, "folderID", folderID)
+
 	file, err := os.Open(filePath)
 	if err != nil {
+		logger.Error("Failed to open file", "path", filePath, "error", err)
 		return fmt.Errorf("failed to open file: %v", err)
 	}
 	defer file.Close()
 
 	// Extract filename
 	fileName := filepath.Base(filePath)
+	logger.Debug("Extracted filename", "filename", fileName)
 
 	// Upload to Google Drive
 	f := &drive.File{
@@ -569,16 +661,22 @@ func uploadFile(ctx context.Context, driveService *drive.Service, filePath strin
 	// Set parent folder if specified
 	if folderID != "" {
 		f.Parents = []string{folderID}
+		logger.Debug("Setting parent folder ID", "folderID", folderID)
+	} else {
+		logger.Debug("No folderID specified, uploading to root directory")
 	}
 
 	// Upload file with context support
 	_, err = driveService.Files.Create(f).Media(file).Context(ctx).Do()
 	if err != nil {
 		if folderID != "" {
+			logger.Error("Failed to upload to Google Drive folder", "filePath", filePath, "folderID", folderID, "error", err)
 			return fmt.Errorf("failed to upload to Google Drive folder (ID: %s): %v", folderID, err)
 		}
+		logger.Error("Failed to upload to Google Drive", "filePath", filePath, "error", err)
 		return fmt.Errorf("failed to upload to Google Drive: %v", err)
 	}
 
+	logger.Debug("File uploaded successfully", "filename", fileName)
 	return nil
 }
