@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.2.0...v1.3.0) (2025-11-13)
+
+
+### Features
+
+* trim quotes in gdrive folder name ([#11](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/11)) ([73747d6](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/73747d65b7f308f9fcf4792754f089c0af33e331))
+
 ## [1.2.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.1.1...v1.2.0) (2025-11-11)
 
 
