@@ -31,6 +31,8 @@ go.work.sum
 # .idea/
 # .vscode/
 
+.DS_Store
+
 build
 
 # Just in case

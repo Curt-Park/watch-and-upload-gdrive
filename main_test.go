@@ -1,8 +1,8 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -14,11 +14,12 @@ import (
 
 // init initializes logger for tests
 func init() {
-	// Initialize logger for tests (use Info level by default)
+	// Initialize logger for tests - suppress output during tests
+	// Use io.Discard to prevent error logs from cluttering test output
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: slog.LevelError, // Only show critical errors, suppress expected error logs
 	}
-	logger = slog.New(slog.NewTextHandler(os.Stdout, opts))
+	logger = slog.New(slog.NewTextHandler(io.Discard, opts))
 }
 
 func TestValidateDirectory(t *testing.T) {
@@ -197,6 +198,18 @@ func TestMatchesFilter(t *testing.T) {
 			filter:   "*.png",
 			want:     true,
 		},
+		{
+			name:     "filter with double quotes - should not match",
+			filename: "test.safetensors",
+			filter:   `"*.safetensors"`,
+			want:     false, // matchesFilter doesn't handle quotes, but run() should trim them
+		},
+		{
+			name:     "filter with single quotes - should not match",
+			filename: "test.safetensors",
+			filter:   `'*.safetensors'`,
+			want:     false, // matchesFilter doesn't handle quotes, but run() should trim them
+		},
 	}
 
 	for _, tt := range tests {
@@ -316,82 +329,100 @@ func TestSaveToken(t *testing.T) {
 	}
 }
 
-func TestWaitForFileReady(t *testing.T) {
-	tmpDir, err := os.MkdirTemp("", "wug-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tmpDir)
+func TestFileWriteTracker(t *testing.T) {
+	tracker := newFileWriteTracker()
+	testPath := "/test/path/file.txt"
 
-	testFile := filepath.Join(tmpDir, "test.txt")
-
-	t.Run("file ready immediately", func(t *testing.T) {
-		// Create a file with some content
-		if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
-			t.Fatalf("Failed to create test file: %v", err)
-		}
-
-		ctx := context.Background()
-		err := waitForFileReady(ctx, testFile)
-		if err != nil {
-			t.Errorf("waitForFileReady() error = %v", err)
+	t.Run("initial state not ready", func(t *testing.T) {
+		if tracker.isReady(testPath) {
+			t.Error("File should not be ready initially")
 		}
 	})
 
-	t.Run("non-existent file", func(t *testing.T) {
-		ctx := context.Background()
-		err := waitForFileReady(ctx, filepath.Join(tmpDir, "nonexistent.txt"))
-		if err == nil {
-			t.Error("waitForFileReady() expected error for non-existent file")
+	t.Run("ready after write debounce", func(t *testing.T) {
+		tracker.updateWrite(testPath)
+		// Should not be ready immediately
+		if tracker.isReady(testPath) {
+			t.Error("File should not be ready immediately after write")
+		}
+		// Wait for debounce delay
+		time.Sleep(writeDebounceDelay + 100*time.Millisecond)
+		if !tracker.isReady(testPath) {
+			t.Error("File should be ready after debounce delay")
 		}
 	})
 
-	t.Run("context cancellation", func(t *testing.T) {
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel() // Cancel immediately
-
-		if err := os.WriteFile(testFile, []byte("test"), 0644); err != nil {
-			t.Fatalf("Failed to create test file: %v", err)
+	t.Run("ready immediately after rename", func(t *testing.T) {
+		renamePath := "/test/path/renamed.txt"
+		tracker.markRenamed(renamePath)
+		if !tracker.isReady(renamePath) {
+			t.Error("File should be ready immediately after rename")
 		}
+	})
 
-		err := waitForFileReady(ctx, testFile)
-		if err == nil {
-			t.Error("waitForFileReady() expected error for cancelled context")
+	t.Run("remove state", func(t *testing.T) {
+		tracker.updateWrite(testPath)
+		tracker.remove(testPath)
+		if tracker.isReady(testPath) {
+			t.Error("File should not be ready after removal")
+		}
+	})
+
+	t.Run("ready after create without write events", func(t *testing.T) {
+		createPath := "/test/path/created.txt"
+		tracker.markCreated(createPath)
+		// Should not be ready immediately
+		if tracker.isReady(createPath) {
+			t.Error("File should not be ready immediately after create")
+		}
+		// Wait for debounce delay
+		time.Sleep(writeDebounceDelay + 100*time.Millisecond)
+		if !tracker.isReady(createPath) {
+			t.Error("File should be ready after debounce delay even without write events")
 		}
 	})
 }
 
-func TestWaitForFileReady_FileSizeStabilization(t *testing.T) {
+// TestFileCreateWithoutWriteEvents tests the scenario where a file is created
+// but no Write events are generated (e.g., file created atomically or written very quickly).
+// This test ensures that markCreated is called and the file becomes ready even without Write events.
+func TestFileCreateWithoutWriteEvents(t *testing.T) {
 	tmpDir, err := os.MkdirTemp("", "wug-test-*")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
 	}
 	defer os.RemoveAll(tmpDir)
 
-	testFile := filepath.Join(tmpDir, "growing.txt")
-
-	// Create a file that grows over time
-	go func() {
-		f, err := os.Create(testFile)
-		if err != nil {
-			return
-		}
-		defer f.Close()
-
-		for i := 0; i < 5; i++ {
-			f.WriteString("test data\n")
-			f.Sync()
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
-
-	// Wait a bit for file to start growing
-	time.Sleep(50 * time.Millisecond)
-
-	ctx := context.Background()
-	err = waitForFileReady(ctx, testFile)
+	testFile := filepath.Join(tmpDir, "test.safetensors")
+	normalizedPath, err := normalizePath(testFile)
 	if err != nil {
-		t.Errorf("waitForFileReady() error = %v", err)
+		t.Fatalf("Failed to normalize path: %v", err)
+	}
+
+	// Create file atomically (no Write events will be generated)
+	if err := os.WriteFile(testFile, []byte("test content"), 0644); err != nil {
+		t.Fatalf("Failed to create test file: %v", err)
+	}
+
+	// Setup tracker
+	tracker := newFileWriteTracker()
+
+	// Simulate the fix: markCreated must be called when Create event is detected
+	// This was the bug - markCreated wasn't being called, so files without Write events
+	// would never become ready
+	tracker.markCreated(normalizedPath)
+
+	// Verify file is not ready immediately
+	if tracker.isReady(normalizedPath) {
+		t.Error("File should not be ready immediately after create")
+	}
+
+	// Wait for debounce delay
+	time.Sleep(writeDebounceDelay + 100*time.Millisecond)
+
+	// Verify file becomes ready after debounce delay even without Write events
+	if !tracker.isReady(normalizedPath) {
+		t.Error("File should be ready after debounce delay even without Write events. This verifies that markCreated properly initializes the tracker state.")
 	}
 }
 

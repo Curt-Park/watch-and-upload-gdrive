@@ -15,30 +15,43 @@
 
 ### 방법 1: 사전 빌드된 바이너리 다운로드 (권장)
 
-1. [릴리즈 페이지](https://github.com/Curt-Park/watch-and-upload-gdrive/releases)로 이동
-2. 플랫폼에 맞는 바이너리를 다운로드:
-   - **Linux**: `wug-linux-amd64`
-   - **macOS (Intel)**: `wug-darwin-amd64`
-   - **macOS (Apple Silicon)**: `wug-darwin-arm64`
-   - **Windows**: `wug-windows-amd64.exe`
-3. 실행 권한 부여 및 `wug`로 이름 변경 (Linux/macOS):
+다음 명령어 중 플랫폼에 맞는 것을 사용하여 최신 릴리즈를 다운로드하세요:
+
+#### Linux
 ```bash
-# Linux
-chmod +x wug-linux-amd64
-mv wug-linux-amd64 wug
-
-# macOS Intel
-chmod +x wug-darwin-amd64
-mv wug-darwin-amd64 wug
-
-# macOS Apple Silicon
-chmod +x wug-darwin-arm64
-mv wug-darwin-arm64 wug
-
-# Windows: wug-windows-amd64.exe를 wug.exe로 이름 변경
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-linux-amd64 -O wug
+chmod +x wug
 ```
 
-4. PATH에 있는 디렉토리로 이동 (선택사항):
+#### macOS (Intel)
+```bash
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-darwin-amd64 -O wug
+chmod +x wug
+```
+
+#### macOS (Apple Silicon)
+```bash
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-darwin-arm64 -O wug
+chmod +x wug
+```
+
+#### Windows
+```bash
+# PowerShell 사용
+Invoke-WebRequest -Uri https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-windows-amd64.exe -OutFile wug.exe
+
+# 또는 curl 사용 (사용 가능한 경우)
+curl -L -o wug.exe https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-windows-amd64.exe
+```
+
+**참고**: `wget`이 없는 경우 `curl`을 사용할 수 있습니다:
+```bash
+# Linux/macOS에서 curl 사용
+curl -L -o wug https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-linux-amd64
+chmod +x wug
+```
+
+#### PATH에 설치 (선택사항)
 ```bash
 # Linux/macOS
 sudo mv wug /usr/local/bin/wug
@@ -212,9 +225,44 @@ Google Drive의 특정 폴더에 파일을 업로드하려면 `--path` 또는 `-
 
 1. 프로그램이 지정된 디렉토리에서 새 파일을 감시합니다
 2. 새 파일이 생성되면 자동으로 감지됩니다
-3. 파일이 완전히 작성될 때까지 대기합니다 (파일 크기 안정화 확인)
+3. 지능형 파일 쓰기 완료 감지 메커니즘을 사용하여 파일이 완전히 작성될 때까지 대기합니다
 4. 필터가 지정된 경우 파일 확장자를 확인합니다
 5. 파일이 Google Drive에 업로드됩니다
+
+### 파일 쓰기 완료 감지
+
+프로그램은 고정된 타임아웃 없이 파일 쓰기 완료를 정확하게 감지하기 위해 **디바운스 + rename 패턴**을 사용합니다:
+
+#### 1. **Write 이벤트 디바운싱**
+- 파일 시스템 감시자로부터 `Write` 이벤트를 모니터링합니다
+- 각 파일의 마지막 쓰기 이벤트 타임스탬프를 추적합니다
+- 쓰기 이벤트가 2초 동안 멈추면 (디바운스 지연) 파일이 준비된 것으로 간주됩니다
+- 이는 점진적으로 또는 청크 단위로 작성되는 파일을 처리합니다
+
+#### 2. **Rename 이벤트 감지**
+- 많은 애플리케이션이 임시 파일에 먼저 쓰고 나중에 최종 파일명으로 이름을 변경합니다
+- `Rename` 이벤트가 감지되면 파일이 즉시 준비된 것으로 간주됩니다
+- 이는 원자적 쓰기 패턴을 사용하는 애플리케이션에 즉각적인 감지를 제공합니다
+
+#### 3. **결합된 접근 방식**
+- **Create 이벤트**: 파일 쓰기 완료를 모니터링하기 시작합니다
+- **Write 이벤트**: 마지막 쓰기 타임스탬프를 업데이트합니다 (디바운스 메커니즘)
+- **Rename 이벤트**: 파일을 즉시 준비된 것으로 표시합니다 (원자적 쓰기 패턴)
+- 다음 중 하나가 발생하면 파일이 업로드 대기열에 추가됩니다:
+  - 쓰기 이벤트가 2초 동안 멈춤 (디바운스), 또는
+  - Rename 이벤트가 감지됨
+
+#### 장점
+- **고정 타임아웃 없음**: 모든 크기의 파일에 자동으로 적응합니다
+- **빠른 감지**: Rename 이벤트가 원자적 쓰기에 즉각적인 감지를 제공합니다
+- **신뢰성**: 디바운싱은 업로드 전에 파일이 완전히 작성되도록 보장합니다
+- **효율성**: 작은 파일과 큰 파일 모두에서 잘 작동합니다 (예: safetensors 파일)
+
+이 접근 방식은 특히 다음에 효과적입니다:
+- 쓰는 데 시간이 걸리는 큰 파일 (모델 파일, 데이터셋 등)
+- 원자적 쓰기를 사용하는 애플리케이션 (임시 파일 → rename)
+- 점진적으로 또는 청크 단위로 작성되는 파일
+- 쓰기 타이밍이 달라질 수 있는 네트워크 파일 시스템
 
 ## 문제 해결
 
@@ -240,7 +288,7 @@ Google Drive의 특정 폴더에 파일을 업로드하려면 `--path` 또는 `-
 ## 참고 사항
 
 - 프로그램 시작 시 이미 존재하는 파일은 업로드되지 않습니다 (새로 생성된 파일만 업로드됨)
-- 프로그램은 파일이 완전히 작성될 때까지 최대 30초 동안 대기합니다
+- 프로그램은 고정된 타임아웃 대신 지능형 파일 쓰기 감지 (디바운스 + rename 패턴)를 사용합니다
 - `credentials.json`과 `token.json` 파일은 홈 디렉토리에 저장되며 민감한 정보를 포함하므로 Git에 커밋하지 마세요 (이미 `.gitignore`에 포함됨)
 
 ## 라이선스
