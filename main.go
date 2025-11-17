@@ -28,8 +28,9 @@ const (
 	tokenURI             = "https://oauth2.googleapis.com/token"
 	authProviderCertURL  = "https://www.googleapis.com/oauth2/v1/certs"
 	defaultTokenFileName = "token.json"
-	maxWaitTime          = 30 * time.Second
-	checkInterval        = 500 * time.Millisecond
+	// File write detection
+	writeDebounceDelay    = 2 * time.Second // Wait time after last write event
+	debounceCheckInterval = 200 * time.Millisecond
 )
 
 // Exit codes
@@ -107,6 +108,8 @@ func run(cmd *cobra.Command, args []string) error {
 	}
 
 	if filterPattern != "" {
+		// Remove surrounding quotes if present (e.g., "*.txt" -> *.txt, '*.txt' -> *.txt)
+		filterPattern = trimQuotes(filterPattern)
 		if err := validateFilter(filterPattern); err != nil {
 			logger.Error("Invalid filter pattern", "pattern", filterPattern, "error", err)
 			return fmt.Errorf("%w: %v", ErrInvalidFilter, err)
@@ -311,7 +314,7 @@ func getDriveClient(ctx context.Context) (*drive.Service, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			logger.Error("Credentials file not found", "path", credentialsFile, "homeDir", homeDir)
-			return nil, fmt.Errorf(`%w: credentials.json file not found
+			msg := fmt.Sprintf(`credentials.json file not found
 
 Please follow these steps to set up Google Drive credentials:
 
@@ -330,7 +333,8 @@ Please follow these steps to set up Google Drive credentials:
    - Click the download icon (⬇️) next to your OAuth 2.0 Client ID
    - Save the JSON file as "credentials.json" in your home directory (%s)
 
-For detailed instructions, see the README.md file.`, ErrConfigNotFound, homeDir)
+For detailed instructions, see the README.md file.`, homeDir)
+			return nil, fmt.Errorf("%w: %s", ErrConfigNotFound, strings.TrimSpace(msg))
 		}
 		logger.Error("Failed to read credentials file", "path", credentialsFile, "error", err)
 		return nil, fmt.Errorf("failed to read credentials file: %v", err)
@@ -463,6 +467,92 @@ func scanExistingFiles(dirPath string) (map[string]bool, error) {
 	return existingFiles, nil
 }
 
+// fileWriteState tracks the state of a file being written
+type fileWriteState struct {
+	lastWriteTime  time.Time
+	renameDetected bool
+	mu             sync.Mutex
+}
+
+// fileWriteTracker manages file write states for debouncing
+type fileWriteTracker struct {
+	states map[string]*fileWriteState
+	mu     sync.RWMutex
+}
+
+func newFileWriteTracker() *fileWriteTracker {
+	return &fileWriteTracker{
+		states: make(map[string]*fileWriteState),
+	}
+}
+
+func (t *fileWriteTracker) getOrCreateState(path string) *fileWriteState {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	state, exists := t.states[path]
+	if !exists {
+		state = &fileWriteState{}
+		t.states[path] = state
+	}
+	return state
+}
+
+func (t *fileWriteTracker) updateWrite(path string) {
+	state := t.getOrCreateState(path)
+	state.mu.Lock()
+	state.lastWriteTime = time.Now()
+	state.mu.Unlock()
+}
+
+func (t *fileWriteTracker) markRenamed(path string) {
+	state := t.getOrCreateState(path)
+	state.mu.Lock()
+	state.renameDetected = true
+	state.mu.Unlock()
+}
+
+func (t *fileWriteTracker) markCreated(path string) {
+	state := t.getOrCreateState(path)
+	state.mu.Lock()
+	if state.lastWriteTime.IsZero() {
+		state.lastWriteTime = time.Now()
+	}
+	state.mu.Unlock()
+}
+
+func (t *fileWriteTracker) isReady(path string) bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+
+	state, exists := t.states[path]
+	if !exists {
+		return false
+	}
+
+	state.mu.Lock()
+	defer state.mu.Unlock()
+
+	// Rename detected = file is ready
+	if state.renameDetected {
+		return true
+	}
+
+	// Check if write events have stopped (debounce)
+	if !state.lastWriteTime.IsZero() {
+		timeSinceLastWrite := time.Since(state.lastWriteTime)
+		return timeSinceLastWrite >= writeDebounceDelay
+	}
+
+	return false
+}
+
+func (t *fileWriteTracker) remove(path string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.states, path)
+}
+
 // processFileEvent checks if a file should be processed for upload
 func processFileEvent(normalizedPath string, filter string, existingFiles map[string]bool) bool {
 	info, err := os.Stat(normalizedPath)
@@ -548,6 +638,8 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 	logger.Debug("Starting upload workers", "folderID", folderID)
 	startUploadWorkers(ctx, &wg, uploadQueue, driveService, folderID, numWorkers)
 
+	tracker := newFileWriteTracker()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -560,28 +652,33 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 				return nil
 			}
 
+			normalizedPath, err := normalizePath(event.Name)
+			if err != nil {
+				logger.Error("Failed to normalize event path", "path", event.Name, "error", err)
+				continue
+			}
+
+			// Handle Write events (debounce)
+			if event.Op&fsnotify.Write == fsnotify.Write {
+				tracker.updateWrite(normalizedPath)
+			}
+
+			// Handle Rename events (temp file -> final file)
+			if event.Op&fsnotify.Rename == fsnotify.Rename {
+				logger.Debug("File rename event detected", "path", normalizedPath)
+				tracker.markRenamed(normalizedPath)
+				// Rename means file is ready, trigger immediate check
+				go checkAndQueueFile(ctx, normalizedPath, filter, tracker, uploadQueue)
+			}
+
+			// Handle Create events
 			if event.Op&fsnotify.Create == fsnotify.Create {
-				logger.Debug("File creation event detected", "path", event.Name)
-				normalizedPath, err := normalizePath(event.Name)
-				if err != nil {
-					logger.Error("Failed to normalize event path", "path", event.Name, "error", err)
-					continue
-				}
-				logger.Debug("Normalized event path", "path", normalizedPath)
+				logger.Debug("File creation event detected", "path", normalizedPath)
 
 				if processFileEvent(normalizedPath, filter, existingFiles) {
-					logger.Debug("File event processed, waiting for file ready", "path", normalizedPath)
-					if err := waitForFileReady(ctx, normalizedPath); err != nil {
-						logger.Error("Failed to wait for file ready", "path", normalizedPath, "error", err)
-						continue
-					}
-
-					select {
-					case uploadQueue <- normalizedPath:
-						logger.Debug("File queued for upload", "path", normalizedPath)
-					case <-ctx.Done():
-						return nil
-					}
+					// Initialize tracker state and start monitoring
+					tracker.markCreated(normalizedPath)
+					go checkAndQueueFile(ctx, normalizedPath, filter, tracker, uploadQueue)
 				} else {
 					logger.Debug("File event skipped (filtered or already exists)", "path", normalizedPath)
 				}
@@ -596,36 +693,38 @@ func watchDirectory(ctx context.Context, driveService *drive.Service, dirPath st
 	}
 }
 
-func waitForFileReady(ctx context.Context, filePath string) error {
-	startTime := time.Now()
-	var lastSize int64 = -1
-
+// checkAndQueueFile waits for file to be ready and queues it for upload
+func checkAndQueueFile(ctx context.Context, normalizedPath string, filter string, tracker *fileWriteTracker, uploadQueue chan<- string) {
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return
 		default:
 		}
 
-		info, err := os.Stat(filePath)
-		if err != nil {
-			return err
+		if tracker.isReady(normalizedPath) {
+			// Verify file still exists and matches filter
+			info, err := os.Stat(normalizedPath)
+			if err != nil || info.IsDir() {
+				tracker.remove(normalizedPath)
+				return
+			}
+			if filter != "" && !matchesFilter(normalizedPath, filter) {
+				tracker.remove(normalizedPath)
+				return
+			}
+
+			select {
+			case uploadQueue <- normalizedPath:
+				logger.Debug("File queued for upload", "path", normalizedPath)
+				tracker.remove(normalizedPath)
+				return
+			case <-ctx.Done():
+				return
+			}
 		}
 
-		currentSize := info.Size()
-		if currentSize == lastSize && currentSize > 0 {
-			// File size has stabilized
-			return nil
-		}
-
-		if time.Since(startTime) > maxWaitTime {
-			// Maximum wait time exceeded
-			logger.Error("File ready wait timeout", "path", filePath, "maxWaitTime", maxWaitTime)
-			return fmt.Errorf("file ready wait timeout")
-		}
-
-		lastSize = currentSize
-		time.Sleep(checkInterval)
+		time.Sleep(debounceCheckInterval)
 	}
 }
 

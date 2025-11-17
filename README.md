@@ -15,30 +15,43 @@ A Go-based CLI tool that watches a directory and automatically uploads new files
 
 ### Option 1: Download Pre-built Binary (Recommended)
 
-1. Go to the [Releases page](https://github.com/Curt-Park/watch-and-upload-gdrive/releases)
-2. Download the binary for your platform:
-   - **Linux**: `wug-linux-amd64`
-   - **macOS (Intel)**: `wug-darwin-amd64`
-   - **macOS (Apple Silicon)**: `wug-darwin-arm64`
-   - **Windows**: `wug-windows-amd64.exe`
-3. Make it executable and rename to `wug` (Linux/macOS):
+Download the latest release for your platform using one of the following commands:
+
+#### Linux
 ```bash
-# Linux
-chmod +x wug-linux-amd64
-mv wug-linux-amd64 wug
-
-# macOS Intel
-chmod +x wug-darwin-amd64
-mv wug-darwin-amd64 wug
-
-# macOS Apple Silicon
-chmod +x wug-darwin-arm64
-mv wug-darwin-arm64 wug
-
-# Windows: Rename wug-windows-amd64.exe to wug.exe
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-linux-amd64 -O wug
+chmod +x wug
 ```
 
-4. Move to a directory in your PATH (optional):
+#### macOS (Intel)
+```bash
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-darwin-amd64 -O wug
+chmod +x wug
+```
+
+#### macOS (Apple Silicon)
+```bash
+wget https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-darwin-arm64 -O wug
+chmod +x wug
+```
+
+#### Windows
+```bash
+# Using PowerShell
+Invoke-WebRequest -Uri https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-windows-amd64.exe -OutFile wug.exe
+
+# Or using curl (if available)
+curl -L -o wug.exe https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-windows-amd64.exe
+```
+
+**Note**: If `wget` is not available, you can use `curl` instead:
+```bash
+# Linux/macOS alternative using curl
+curl -L -o wug https://github.com/Curt-Park/watch-and-upload-gdrive/releases/latest/download/wug-linux-amd64
+chmod +x wug
+```
+
+#### Install to PATH (optional)
 ```bash
 # Linux/macOS
 sudo mv wug /usr/local/bin/wug
@@ -212,9 +225,44 @@ When you run the program for the first time, an authentication URL will be displ
 
 1. The program watches the specified directory for new files
 2. When a new file is created, it's automatically detected
-3. The program waits until the file is completely written (checks for file size stability)
+3. The program waits until the file is completely written using an intelligent detection mechanism
 4. If a filter is specified, the file extension is checked
 5. The file is uploaded to Google Drive
+
+### File Write Completion Detection
+
+The program uses a sophisticated **debounce + rename pattern** to accurately detect when file writing is complete, eliminating the need for fixed timeouts:
+
+#### 1. **Write Event Debouncing**
+- Monitors `Write` events from the file system watcher
+- Tracks the last write event timestamp for each file
+- When write events stop for 2 seconds (debounce delay), the file is considered ready
+- This handles files that are written incrementally or in chunks
+
+#### 2. **Rename Event Detection**
+- Many applications write to a temporary file first, then rename it to the final filename
+- When a `Rename` event is detected, the file is immediately considered ready
+- This provides instant detection for applications using the atomic write pattern
+
+#### 3. **Combined Approach**
+- **Create event**: Starts monitoring the file for write completion
+- **Write events**: Updates the last write timestamp (debounce mechanism)
+- **Rename event**: Immediately marks file as ready (atomic write pattern)
+- The file is queued for upload when either:
+  - Write events have stopped for 2 seconds (debounce), OR
+  - A rename event is detected
+
+#### Benefits
+- **No fixed timeouts**: Adapts to files of any size automatically
+- **Fast detection**: Rename events provide instant detection for atomic writes
+- **Reliable**: Debouncing ensures files are fully written before upload
+- **Efficient**: Works well with both small and large files (e.g., safetensors files)
+
+This approach is particularly effective for:
+- Large files that take time to write (model files, datasets, etc.)
+- Applications that use atomic writes (temporary file → rename)
+- Files written incrementally or in chunks
+- Network file systems where write timing can vary
 
 ## Troubleshooting
 
@@ -240,7 +288,7 @@ When you run the program for the first time, an authentication URL will be displ
 ## Notes
 
 - Files that already exist when the program starts are not uploaded (only newly created files are uploaded)
-- The program waits up to 30 seconds for a file to be completely written
+- The program uses intelligent file write detection (debounce + rename pattern) instead of fixed timeouts
 - The `credentials.json` and `token.json` files are stored in your home directory and contain sensitive information and should never be committed to Git (already included in `.gitignore`)
 
 ## License
