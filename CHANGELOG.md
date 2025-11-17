@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.3.0...v1.4.0) (2025-11-17)
+
+
+### Features
+
+* detect file write with debounce + rename check ([#13](https://github.com/Curt-Park/watch-and-upload-gdrive/issues/13)) ([4e4a918](https://github.com/Curt-Park/watch-and-upload-gdrive/commit/4e4a91853116f23007bd1c87515f7b2f7a7bc565))
+
 ## [1.3.0](https://github.com/Curt-Park/watch-and-upload-gdrive/compare/v1.2.0...v1.3.0) (2025-11-13)
 
 
